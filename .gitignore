@@ -3,5 +3,8 @@ node_modules/
 firebase-debug.log
 firestore-debug.log
 *.log
+# Local emulator secret values (Secret Manager mirror, never commit)
+.secret.local
+*.secret.local
 .DS_Store
 Thumbs.db

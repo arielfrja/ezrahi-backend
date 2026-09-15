@@ -1,0 +1,38 @@
+name: Deploy Functions
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy-functions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: functions
+
+      - name: Compile
+        run: npm run build
+        working-directory: functions
+
+      - name: Check deploy token
+        run: |
+          if [ -z "${{ secrets.FIREBASE_TOKEN }}" ]; then
+            echo "::error::FIREBASE_TOKEN secret is missing. Run 'firebase login:ci', then add the token as a repo secret named FIREBASE_TOKEN (Settings -> Secrets -> Actions)."
+            exit 1
+          fi
+
+      - name: Deploy functions
+        run: npx -y firebase-tools@15 deploy --only functions --project ezrahi --non-interactive --token ${{ secrets.FIREBASE_TOKEN }}
