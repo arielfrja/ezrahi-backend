@@ -8,3 +8,5 @@ firestore-debug.log
 *.secret.local
 .DS_Store
 Thumbs.db
+
+functions/lib/  # compiled output (firebase deploys from lib/, rebuild in CI)
