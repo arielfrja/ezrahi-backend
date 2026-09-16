@@ -32,10 +32,6 @@ service cloud.firestore {
 
     // Resolve the owning org of an event doc (new org-scoped events carry
     // `orgId`; legacy pilot events have none).
-    function eventOrgId(eventData) {
-      return eventData.keys().hasAny(['orgId']) ? eventData.orgId : '';
-    }
-
     function isOrgAdminOfEventData(eventData) {
       return eventData.keys().hasAny(['orgId']) &&
         eventData.orgId is string && eventData.orgId.size() > 0 &&
