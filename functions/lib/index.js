@@ -64,6 +64,10 @@ exports.registerOrganization = functions.https.onCall({ secrets: [defaultAdminPa
     if (!data.name || !data.adminEmail) {
         throw new functions.https.HttpsError('invalid-argument', 'Missing required fields.');
     }
+    if (data.maxActiveEvents !== undefined && data.maxActiveEvents !== null &&
+        (typeof data.maxActiveEvents !== 'number' || data.maxActiveEvents < 0)) {
+        throw new functions.https.HttpsError('invalid-argument', 'maxActiveEvents must be null or >= 0 (0 = unlimited).');
+    }
     // 3. Resolve the document reference: manual slug or auto-ID
     let orgRef;
     let finalOrgId;
@@ -115,7 +119,10 @@ exports.registerOrganization = functions.https.onCall({ secrets: [defaultAdminPa
         license: {
             status: data.licenseStatus || 'ACTIVE',
             validUntil: admin.firestore.Timestamp.fromDate(new Date(data.validUntilDate)),
-            maxActiveEvents: data.maxActiveEvents || 5,
+            // undefined => default 5; 0/null => unlimited (stored as null).
+            maxActiveEvents: data.maxActiveEvents === undefined
+                ? 5
+                : (data.maxActiveEvents === 0 ? null : data.maxActiveEvents),
         },
         defaults: {
             roles: ['manager', 'medic', 'security', 'guide', 'tail'],

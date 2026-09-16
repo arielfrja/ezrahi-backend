@@ -14,7 +14,8 @@ interface CreateOrgPayload {
   adminPassword?: string;
   licenseStatus: 'ACTIVE' | 'TRIAL' | 'SUSPENDED';
   validUntilDate: string; // ISO String
-  maxActiveEvents: number;
+  /** null = unlimited; undefined = default quota. */
+  maxActiveEvents: number | null;
 }
 
 const SLUG_PATTERN = /^[a-z0-9_-]+$/;
@@ -56,6 +57,12 @@ export const registerOrganization = functions.https.onCall(
   // 2. Validate inputs (orgId is optional — manual slug or auto-ID)
   if (!data.name || !data.adminEmail) {
     throw new functions.https.HttpsError('invalid-argument', 'Missing required fields.');
+  }
+  if (
+    data.maxActiveEvents !== undefined && data.maxActiveEvents !== null &&
+    (typeof data.maxActiveEvents !== 'number' || data.maxActiveEvents < 0)
+  ) {
+    throw new functions.https.HttpsError('invalid-argument', 'maxActiveEvents must be null or >= 0 (0 = unlimited).');
   }
 
   // 3. Resolve the document reference: manual slug or auto-ID
@@ -116,7 +123,10 @@ export const registerOrganization = functions.https.onCall(
     license: {
       status: data.licenseStatus || 'ACTIVE',
       validUntil: admin.firestore.Timestamp.fromDate(new Date(data.validUntilDate)),
-      maxActiveEvents: data.maxActiveEvents || 5,
+      // undefined => default 5; 0/null => unlimited (stored as null).
+      maxActiveEvents: data.maxActiveEvents === undefined
+        ? 5
+        : (data.maxActiveEvents === 0 ? null : data.maxActiveEvents),
     },
     defaults: {
       roles: ['manager', 'medic', 'security', 'guide', 'tail'],
