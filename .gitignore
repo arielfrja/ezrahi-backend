@@ -9,4 +9,5 @@ firestore-debug.log
 .DS_Store
 Thumbs.db
 
-functions/lib/  # compiled output (firebase deploys from lib/, rebuild in CI)
+# Compiled output (rebuild in CI; deploy uses local lib/)
+functions/lib/
