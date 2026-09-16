@@ -1,0 +1,20 @@
+rules_version = '2';
+
+// Storage rules for Ezrahi (project `ezrahi`).
+// GPX route files live under `gpx/` (legacy Android path) and `routes/`
+// (portal Task 5.2 path: routes/{eventId}.gpx). Fine-grained authorization
+// (manager / org-admin / participant) is enforced in Firestore
+// (events/{id}/routes docs + firestore.rules); Storage requires auth as a
+// baseline so anonymous internet users cannot enumerate or overwrite tracks.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /gpx/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+    match /routes/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+  }
+}

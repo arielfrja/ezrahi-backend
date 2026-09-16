@@ -3,11 +3,15 @@ name: Deploy Functions
 on:
   push:
     branches:
+      - main
       - master
 
 jobs:
   deploy-functions:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,12 +31,10 @@ jobs:
         run: npm run build
         working-directory: functions
 
-      - name: Check deploy token
-        run: |
-          if [ -z "${{ secrets.FIREBASE_TOKEN }}" ]; then
-            echo "::error::FIREBASE_TOKEN secret is missing. Run 'firebase login:ci', then add the token as a repo secret named FIREBASE_TOKEN (Settings -> Secrets -> Actions)."
-            exit 1
-          fi
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_EZRAHI }}
 
       - name: Deploy functions
-        run: npx -y firebase-tools@15 deploy --only functions --project ezrahi --non-interactive --token ${{ secrets.FIREBASE_TOKEN }}
+        run: npx -y firebase-tools@15 deploy --only functions,firestore:rules,firestore:indexes --project ezrahi --non-interactive

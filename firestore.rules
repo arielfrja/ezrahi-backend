@@ -16,12 +16,30 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/system_admins/$(request.auth.uid));
     }
 
-    // Tier 1 organization admin (spec section 2.2: uid listed in
-    // /organizations/{orgId}.data.orgAdmins).
+    // Tier 1 organization admin: uid listed in
+    // /organizations/{orgId}.data.orgAdmins.
     function isOrgAdmin(orgId) {
       return isSignedIn() &&
         exists(/databases/$(database)/documents/organizations/$(orgId)) &&
         request.auth.uid in get(/databases/$(database)/documents/organizations/$(orgId)).data.orgAdmins;
+    }
+
+    // Organization license is ACTIVE (Task 1.2: event creation gate).
+    function orgLicenseActive(orgId) {
+      return exists(/databases/$(database)/documents/organizations/$(orgId)) &&
+        get(/databases/$(database)/documents/organizations/$(orgId)).data.license.status == 'ACTIVE';
+    }
+
+    // Resolve the owning org of an event doc (new org-scoped events carry
+    // `orgId`; legacy pilot events have none).
+    function eventOrgId(eventData) {
+      return eventData.keys().hasAny(['orgId']) ? eventData.orgId : '';
+    }
+
+    function isOrgAdminOfEventData(eventData) {
+      return eventData.keys().hasAny(['orgId']) &&
+        eventData.orgId is string && eventData.orgId.size() > 0 &&
+        isOrgAdmin(eventData.orgId);
     }
 
     // ---------------------------------------------------------------
@@ -46,94 +64,130 @@ service cloud.firestore {
         allow read, write: if isSuperAdmin() || isOrgAdmin(orgId);
       }
 
-      // Future org subcollections: super-admin keeps full access.
+      // Any future org subcollection: org admins of this org + super-admin.
       match /{allChildren=**} {
-        allow read, write: if isSuperAdmin();
+        allow read, write: if isSuperAdmin() || isOrgAdmin(orgId);
       }
     }
 
     // ---------------------------------------------------------------
-    // Android app rules below (moved unchanged from the Android repo).
+    // 1b. Canonical lowercase user profiles (snake_case).
+    //     New path for FCM tokens + field profiles. Legacy `Users`
+    //     (capital U) is kept below for backward compat during migration.
+    //     Functions read tokens via Admin SDK (bypasses rules).
     // ---------------------------------------------------------------
-
-    // The requesting user has a participant document in the event
-    function isEventParticipant(eventId) {
-      return isSignedIn() &&
-        exists(/databases/$(database)/documents/events/$(eventId)/participants/$(request.auth.uid));
-    }
-
-    // The requesting user manages the event
-    function isEventManager(eventId) {
-      return isSignedIn() &&
-        get(/databases/$(database)/documents/events/$(eventId)).data.managerId == request.auth.uid;
-    }
-
-    // Participants AND managers may access event content (participant list,
-    // live locations, messages). Managers are not necessarily participants.
-    function canAccessEvent(eventId) {
-      return isSignedIn() && (isEventParticipant(eventId) || isEventManager(eventId));
-    }
-
-    // ---------------------------------------------------------------
-    // User profiles: users manage only their own profile document
-    //    (document id == Firebase Auth uid; written by registerUser)
-    // ---------------------------------------------------------------
-    match /Users/{userId} {
-      allow read: if isSignedIn() && request.auth.uid == userId;
+    match /users/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isSuperAdmin());
       allow create, update: if isSignedIn() && request.auth.uid == userId;
       allow delete: if false;
     }
 
     // ---------------------------------------------------------------
-    // Reports (legacy top-level collection, still the app's live
-    //    report path; documents carry ActId -> eventId). Signed-in users
-    //    may read reports and create reports under their own ReporterId.
-    //    The EVENT MANAGER may update (deletion resolution: convert to
-    //    another type) or delete (removal resolution) reports of their
-    //    event — spec docs/specs/dynamic-report-types.md §5.1/§8.
+    // Event helpers (parameterized by collection so `events` and the
+    // spec-alias `activities` share identical logic without migration).
+    // Canonical live collection is `events` (Android + portal). `activities`
+    // is accepted as an alias for the work-plan naming; both behave the same.
     // ---------------------------------------------------------------
-    match /Reports/{reportId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && request.resource.data.ReporterId == request.auth.uid;
-      function reportEvent() {
-        return get(/databases/$(database)/documents/events/$(resource.data.ActId));
-      }
-      allow update, delete: if isSignedIn() &&
-        exists(/databases/$(database)/documents/events/$(resource.data.ActId)) &&
-        reportEvent().data.managerId == request.auth.uid;
+
+    // ---- events (canonical) helpers ----
+    function isEventParticipant(eventId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/events/$(eventId)/participants/$(request.auth.uid));
+    }
+    function isEventManager(eventId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/events/$(eventId)) &&
+        get(/databases/$(database)/documents/events/$(eventId)).data.managerId == request.auth.uid;
+    }
+    function canAccessEvent(eventId) {
+      return isSignedIn() && (isEventParticipant(eventId) || isEventManager(eventId));
+    }
+    function isOrgAdminOfEvent(eventId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/events/$(eventId)) &&
+        isOrgAdminOfEventData(get(/databases/$(database)/documents/events/$(eventId)).data);
+    }
+
+    // ---- activities (spec alias) helpers ----
+    function isActivityParticipant(actId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/activities/$(actId)/participants/$(request.auth.uid));
+    }
+    function isActivityManager(actId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/activities/$(actId)) &&
+        get(/databases/$(database)/documents/activities/$(actId)).data.managerId == request.auth.uid;
+    }
+    function canAccessActivity(actId) {
+      return isSignedIn() && (isActivityParticipant(actId) || isActivityManager(actId));
+    }
+    function isOrgAdminOfActivity(actId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/activities/$(actId)) &&
+        isOrgAdminOfEventData(get(/databases/$(database)/documents/activities/$(actId)).data);
+    }
+
+    // Creation gate (Task 1.2): org-scoped events require an ACTIVE license
+    // and org-admin (or super-admin) caller. Legacy pilot events without
+    // `orgId` remain creatable by any signed-in user until migration.
+    function canCreateOrgEvent(newData) {
+      return isSuperAdmin() ||
+        (newData.keys().hasAny(['orgId']) && newData.orgId is string && newData.orgId.size() > 0 &&
+         isOrgAdmin(newData.orgId) && orgLicenseActive(newData.orgId));
+    }
+    function canCreateLegacyEvent(newData) {
+      return isSignedIn() && !(newData.keys().hasAny(['orgId']) && newData.orgId is string && newData.orgId.size() > 0);
     }
 
     // ---------------------------------------------------------------
-    // Settings (dynamic role options, future app settings).
-    //    Readable by signed-in users; managed via admin tooling only.
-    // ---------------------------------------------------------------
-    match /settings/{docId} {
-      allow read: if isSignedIn();
-      allow write: if false;
-    }
-
-    // ---------------------------------------------------------------
-    // Events
+    // 2. Events (canonical live collection) + Activities (spec alias).
     // ---------------------------------------------------------------
     match /events/{eventId} {
-      // Anyone logged in can read an event or create one
+      // Read: any signed-in user (legacy compat) + org admins + super-admin.
       allow read: if isSignedIn();
-      allow create: if isSignedIn();
-      // Only the manager may modify/delete an event
-      allow update, delete: if isEventManager(eventId);
+      // Create: org gate (ACTIVE license) or legacy pilot path.
+      allow create: if canCreateOrgEvent(request.resource.data) || canCreateLegacyEvent(request.resource.data);
+      // Update/delete: manager, owning-org admin, or super-admin.
+      allow update, delete: if isEventManager(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin();
 
       // Participants sub-collection (Live Location Tracking)
       match /participants/{userId} {
-        // Participants and managers may read all participant locations
-        allow read: if canAccessEvent(eventId);
-        // A user can create/overwrite/delete their OWN document; the event
-        // manager may also write (e.g. assign/change participant roles)
-        allow write: if isSignedIn() && (request.auth.uid == userId || isEventManager(eventId));
+        allow read: if canAccessEvent(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin();
+        allow write: if isSignedIn() && (request.auth.uid == userId || isEventManager(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin());
+      }
+
+      // Live locations (latest point only — no historic breadcrumbs).
+      match /locations/{userId} {
+        allow read: if canAccessEvent(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin();
+        // Owner writes own point; manager/org-admin/super-admin may write
+        // (e.g. terminateActivity flips isTracking/offline remotely).
+        allow write: if isSignedIn() && (request.auth.uid == userId || isEventManager(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin());
+      }
+
+      // Incident reports (4 categories; HIGH iff MEDICAL/SECURITY — enforced
+      // in the Function + client, stored as `severity`).
+      match /incidents/{incidentId} {
+        allow read: if canAccessEvent(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin();
+        allow create: if isEventParticipant(eventId) &&
+          request.resource.data.reporterId == request.auth.uid;
+        // Only reporter or manager updates status; manager may delete
+        // (RESOLVED removes the marker).
+        allow update: if isSignedIn() && (
+          resource.data.reporterId == request.auth.uid || isEventManager(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin()
+        );
+        allow delete: if isEventManager(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin();
+      }
+
+      // Hierarchical role invites (6-digit code docs; doc id == code).
+      match /invites/{code} {
+        // Join-by-code: any signed-in user (incl. anonymous field devices)
+        // may GET a single invite to resolve role + superior.
+        allow get: if isSignedIn();
+        allow list: if canAccessEvent(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin();
+        allow write: if isEventManager(eventId) || isOrgAdminOfEvent(eventId) || isSuperAdmin();
       }
 
       // Direct messages: one sub-collection per participant pair.
-      //     Pair id = sorted "uidA_uidB"; only the two participants may
-      //     read or write it.
       match /direct/{pairId} {
         function isPairMember() {
           return pairId.split("_").hasAny([request.auth.uid]);
@@ -151,16 +205,11 @@ service cloud.firestore {
       // Messages sub-collection
       match /messages/{messageId} {
         allow read: if canAccessEvent(eventId);
-        // Only an event participant can send, and only their own messages
         allow create: if isEventParticipant(eventId) && request.resource.data.senderId == request.auth.uid;
         allow update, delete: if false;
       }
 
-      // Routes sub-collection (planned GPX trails). Route management
-      //     (create/update/delete/activate) is allowed for the manager and
-      //     for any participant whose role or uid the manager explicitly
-      //     permitted via the event doc fields routeAllowedRoles /
-      //     routeAllowedUids (dynamically toggled from the app).
+      // Routes sub-collection (planned GPX trails).
       function isRoutePermitted(eventId) {
         return get(/databases/$(database)/documents/events/$(eventId)).data.managerId == request.auth.uid ||
           (get(/databases/$(database)/documents/events/$(eventId)).data.routeAllowedUids is list &&
@@ -176,19 +225,11 @@ service cloud.firestore {
           request.resource.data.name is string &&
           request.resource.data.name.size() > 0 &&
           request.resource.data.storagePath is string &&
-          request.resource.data.storagePath.matches('gpx/.*') &&
+          (request.resource.data.storagePath.matches('gpx/.*') || request.resource.data.storagePath.matches('routes/.*')) &&
           request.resource.data.uploadedBy == request.auth.uid;
         allow update, delete: if isRoutePermitted(eventId);
       }
 
-      // -------------------------------------------------------------
-      // Report type definitions
-      //     (spec docs/specs/dynamic-report-types.md §8)
-      //     Per-event user-defined report categories. Managers manage;
-      //     participants read. Builtin seeds (GENERAL/MEDICAL) are
-      //     undeletable and their builtin flag immutable, but their
-      //     display properties (name/iconKey) MAY be overridden.
-      // -------------------------------------------------------------
       function isValidReportTypeName() {
         return request.resource.data.name is string &&
           request.resource.data.name.size() >= 1 &&
@@ -211,17 +252,81 @@ service cloud.firestore {
       }
     }
 
+    // Spec-alias `activities` — identical behavior, no migration required.
+    match /activities/{actId} {
+      allow read: if isSignedIn();
+      allow create: if canCreateOrgEvent(request.resource.data) || canCreateLegacyEvent(request.resource.data);
+      allow update, delete: if isActivityManager(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin();
+
+      match /participants/{userId} {
+        allow read: if canAccessActivity(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin();
+        allow write: if isSignedIn() && (request.auth.uid == userId || isActivityManager(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin());
+      }
+      match /locations/{userId} {
+        allow read: if canAccessActivity(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin();
+        allow write: if isSignedIn() && (request.auth.uid == userId || isActivityManager(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin());
+      }
+      match /incidents/{incidentId} {
+        allow read: if canAccessActivity(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin();
+        allow create: if isActivityParticipant(actId) &&
+          request.resource.data.reporterId == request.auth.uid;
+        allow update: if isSignedIn() && (
+          resource.data.reporterId == request.auth.uid || isActivityManager(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin()
+        );
+        allow delete: if isActivityManager(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin();
+      }
+      match /invites/{code} {
+        allow get: if isSignedIn();
+        allow list: if canAccessActivity(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin();
+        allow write: if isActivityManager(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin();
+      }
+      match /routes/{routeId} {
+        allow read: if canAccessActivity(actId);
+        allow write: if isActivityManager(actId) || isOrgAdminOfActivity(actId) || isSuperAdmin();
+      }
+    }
+
     // ---------------------------------------------------------------
-    // App error logging (spec docs/specs/todo-fix-6-exception-logging.md).
-    //    Clients may CREATE records (authenticated under their own uid, or
-    //    anonymous pre-auth under the anon- namespace); records are
-    //    immutable and unreadable from the app (query via console/gcloud).
+    // User profiles: users manage only their own profile document
+    // (legacy capital-U path; new code should use /users/{uid}).
+    // ---------------------------------------------------------------
+    match /Users/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow create, update: if isSignedIn() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // Reports (legacy top-level collection, still the app's live
+    // report path; documents carry ActId -> eventId).
+    // ---------------------------------------------------------------
+    match /Reports/{reportId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.ReporterId == request.auth.uid;
+      function reportEvent() {
+        return get(/databases/$(database)/documents/events/$(resource.data.ActId));
+      }
+      allow update, delete: if isSignedIn() &&
+        exists(/databases/$(database)/documents/events/$(resource.data.ActId)) &&
+        reportEvent().data.managerId == request.auth.uid;
+    }
+
+    // ---------------------------------------------------------------
+    // Settings (dynamic role options, future app settings).
+    // ---------------------------------------------------------------
+    match /settings/{docId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // App error logging (immutable, create-only).
     // ---------------------------------------------------------------
     match /app_errors/{errorId} {
       allow create: if request.resource.data.id == errorId
         && request.resource.data.timestamp is number
-        && request.resource.data.timestamp <= request.time.toMillis() + 300000    // no future-dating > 5 min
-        && request.resource.data.timestamp >= request.time.toMillis() - 86400000  // flush window: backdate <= 24 h
+        && request.resource.data.timestamp <= request.time.toMillis() + 300000
+        && request.resource.data.timestamp >= request.time.toMillis() - 86400000
         && request.resource.data.message is string
         && request.resource.data.message.size() <= 2048
         && request.resource.data.stackTrace is string
@@ -233,14 +338,14 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------------
-    // Collection-group access (event picker: getUserEvents queries
-    //    collectionGroup("participants")). Firestore requires a
-    //    {path=**} rule for collection-group queries. A user may only
-    //    list participant documents that belong to them — i.e. the
-    //    events they joined.
+    // Collection-group access (event picker + invite lookup).
     // ---------------------------------------------------------------
     match /{path=**}/participants/{userId} {
       allow read: if isSignedIn() && request.auth.uid == userId;
+    }
+    match /{path=**}/invites/{code} {
+      allow get: if isSignedIn();
+      allow list: if isSuperAdmin();
     }
   }
 }
