@@ -310,7 +310,17 @@ export const addOrgAdmin = functions.https.onCall(
   }
 
   await orgRef.update({ orgAdmins: admin.firestore.FieldValue.arrayUnion(uid) });
-  return { success: true, uid, email: data.email, created };
+
+  // Credential handoff: the portal shows this link (copy / WhatsApp share)
+  // so the admin can set a usable password. Works for new AND existing users.
+  // Firebase's automatic email is kept as best-effort only (deliverability).
+  let setupPasswordLink = '';
+  try {
+    setupPasswordLink = await auth.generatePasswordResetLink(data.email);
+  } catch {
+    setupPasswordLink = '';
+  }
+  return { success: true, uid, email: data.email, created, setupPasswordLink };
 });
 
 interface RemoveOrgAdminPayload {
